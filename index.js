@@ -80,6 +80,68 @@ async function run() {
       next();
     };
 
+    app.post('/users', async (req, res) => {
+      const user = req.body;
+      const existingUser = await usersCollection.findOne({ email: user.email });
+      if (existingUser) {
+        return res.send({ message: 'user already exists', insertedId: null });
+      }
+      const newUser = {
+        name: user.name,
+        email: user.email,
+        image: user.image || '',
+        role: user.role || 'Customer',
+        phone: user.phone || '',
+        address: user.address || '',
+        createdAt: new Date()
+      };
+      const result = await usersCollection.insertOne(newUser);
+      res.send(result);
+    });
+
+    app.get('/users/role/:email', async (req, res) => {
+      const email = req.params.email;
+      const user = await usersCollection.findOne({ email });
+      res.send({ role: user?.role || 'Customer' });
+    });
+
+    app.get('/users/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const user = await usersCollection.findOne({ email });
+      res.send(user);
+    });
+
+    app.patch('/users/profile/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const { name, image, phone, address } = req.body;
+      const updateDoc = {
+        $set: { name, image, phone, address }
+      };
+      const result = await usersCollection.updateOne({ email }, updateDoc);
+      res.send(result);
+    });
+
+    app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+      const result = await usersCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const { role } = req.body;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role } }
+      );
+      res.send(result);
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
