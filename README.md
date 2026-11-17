@@ -21,3 +21,9 @@ This is the backend server for the Equipment Rental Platform, built with Express
 - stripe
 - node-cron
 - nodemailer
+## API Structure
+- `/users` - User registration, role management, and profile updates
+- `/requipment` - Equipment listing, search, filtering, and approval workflows
+- `/bookings` - Rental booking creation and status tracking
+- `/create-checkout-session` - Stripe payment integration
+- `/analytics` - Platform and owner business performance metrics
