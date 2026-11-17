@@ -43,7 +43,7 @@ async function run() {
       if (!authHeader) {
         return res.status(401).send({ message: 'unauthorized access' });
       }
-      const token = authHeader.split(' ')[1];
+      const token = authHeader.split(' ');
       jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
         if (err) {
           return res.status(401).send({ message: 'unauthorized access' });
@@ -138,6 +138,142 @@ async function run() {
       const result = await usersCollection.updateOne(
         { _id: new ObjectId(id) },
         { $set: { role } }
+      );
+      res.send(result);
+    });
+
+    app.get('/equipment/featured', async (req, res) => {
+      const result = await equipmentCollection
+        .find({ status: 'Approved' })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .toArray();
+      res.send(result);
+    });
+
+    app.get('/equipment', async (req, res) => {
+      const { search, category, rentalType, minPrice, maxPrice, availability, sort, page = 1, limit = 9 } = req.query;
+      const query = { status: 'Approved' };
+
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { location: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      if (category && category !== 'All') {
+        query.category = category;
+      }
+
+      if (rentalType && rentalType !== 'All') {
+        query.rentalType = rentalType;
+      }
+
+      if (minPrice || maxPrice) {
+        query.rentalPrice = {};
+        if (minPrice) query.rentalPrice.$gte = parseFloat(minPrice);
+        if (maxPrice) query.rentalPrice.$lte = parseFloat(maxPrice);
+      }
+
+      if (availability === 'available') {
+        query.availableQuantity = { $gt: 0 };
+      } else if (availability === 'unavailable') {
+        query.availableQuantity = { $lte: 0 };
+      }
+
+      let sortOption = { createdAt: -1 };
+      if (sort === 'price_asc') {
+        sortOption = { rentalPrice: 1 };
+      } else if (sort === 'price_desc') {
+        sortOption = { rentalPrice: -1 };
+      } else if (sort === 'newest') {
+        sortOption = { createdAt: -1 };
+      }
+
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const total = await equipmentCollection.countDocuments(query);
+      const result = await equipmentCollection
+        .find(query)
+        .sort(sortOption)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray();
+
+      res.send({
+        equipment: result,
+        total,
+        totalPages: Math.ceil(total / parseInt(limit)),
+        currentPage: parseInt(page)
+      });
+    });
+
+    app.get('/equipment/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await equipmentCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    app.post('/equipment', verifyToken, verifyOwner, async (req, res) => {
+      const item = req.body;
+      const newEquipment = {
+        ...item,
+        rentalPrice: parseFloat(item.rentalPrice),
+        availableQuantity: parseInt(item.availableQuantity),
+        status: 'Pending',
+        createdAt: new Date()
+      };
+      const result = await equipmentCollection.insertOne(newEquipment);
+      res.send(result);
+    });
+
+    app.get('/equipment/owner/:email', verifyToken, verifyOwner, async (req, res) => {
+      const email = req.params.email;
+      const result = await equipmentCollection.find({ ownerEmail: email }).sort({ createdAt: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.patch('/equipment/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const updatedItem = req.body;
+      const updateDoc = {
+        $set: {
+          name: updatedItem.name,
+          description: updatedItem.description,
+          category: updatedItem.category,
+          location: updatedItem.location,
+          rentalPrice: parseFloat(updatedItem.rentalPrice),
+          rentalType: updatedItem.rentalType,
+          availableQuantity: parseInt(updatedItem.availableQuantity),
+          condition: updatedItem.condition,
+          brand: updatedItem.brand,
+          model: updatedItem.model,
+          image: updatedItem.image,
+          terms: updatedItem.terms
+        }
+      };
+      const result = await equipmentCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+      res.send(result);
+    });
+
+    app.delete('/equipment/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await equipmentCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    app.get('/admin/equipment', verifyToken, verifyAdmin, async (req, res) => {
+      const result = await equipmentCollection.find().sort({ createdAt: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.patch('/admin/equipment/status/:id', verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+      const result = await equipmentCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status } }
       );
       res.send(result);
     });
