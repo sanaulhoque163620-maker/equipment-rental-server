@@ -5,6 +5,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+const cron = require('node-cron');
+const nodemailer = require('nodemailer');
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -468,6 +471,45 @@ async function run() {
         monthlyEarnings
       });
     });
+
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    cron.schedule('0 * * * *', async () => {
+      const now = new Date().toISOString().split('T');
+      const expiredBookings = await bookingsCollection.find({
+        bookingStatus: 'Confirmed',
+        endDate: { $lt: now }
+      }).toArray();
+
+      for (const booking of expiredBookings) {
+        await bookingsCollection.updateOne(
+          { _id: booking._id },
+          { $set: { bookingStatus: 'Completed' } }
+        );
+
+        await equipmentCollection.updateOne(
+          { _id: new ObjectId(booking.equipmentId) },
+          { $inc: { availableQuantity: booking.quantity } }
+        );
+
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+          const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: `${booking.customerEmail}, ${booking.ownerEmail}`,
+            subject: `Rental Completed: ${booking.equipmentName}`,
+            text: `Hello, the rental period for ${booking.equipmentName} (Booking ID: ${booking._id}) has ended and is now marked as Completed.`
+          };
+          transporter.sendMail(mailOptions).catch(err => console.log(err));
+        }
+      }
+    });
+
 
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
