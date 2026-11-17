@@ -3,6 +3,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -278,22 +279,7 @@ async function run() {
       res.send(result);
     });
 
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-
-  } finally {
-  }
-}
-run().catch(console.dir);
-
-app.get('/', (req, res) => {
-  res.send('Equipment Rental Platform Server is Running!');
-});
-
-app.listen(port, () => {
-  console.log(`Server is running on port: ${port}`);
-});
-app.post('/favorites', verifyToken, verifyRenter, async (req, res) => {
+    app.post('/favorites', verifyToken, verifyRenter, async (req, res) => {
       const favorite = req.body;
       const existing = await favoritesCollection.findOne({
         userEmail: favorite.userEmail,
@@ -355,3 +341,146 @@ app.post('/favorites', verifyToken, verifyRenter, async (req, res) => {
       const result = await bookingsCollection.find().sort({ bookingDate: -1 }).toArray();
       res.send(result);
     });
+
+    app.post('/create-checkout-session', verifyToken, verifyRenter, async (req, res) => {
+      const booking = req.body;
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [
+          {
+            price_data: {
+              currency: 'usd',
+              product_data: {
+                name: booking.equipmentName,
+              },
+              unit_amount: Math.round(parseFloat(booking.totalAmount) * 100),
+            },
+            quantity: 1,
+          },
+        ],
+        mode: 'payment',
+        success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&bookingId=${booking.bookingId}`,
+        cancel_url: `${process.env.CLIENT_URL}/equipment/${booking.equipmentId}`,
+      });
+      res.send({ url: session.url });
+    });
+
+    app.post('/payments/confirm', verifyToken, verifyRenter, async (req, res) => {
+      const { sessionId, bookingId } = req.body;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      if (session.payment_status === 'paid') {
+        const existingPayment = await paymentsCollection.findOne({ transactionId: session.payment_intent });
+        if (existingPayment) {
+          return res.send({ success: true, message: 'Payment already recorded' });
+        }
+
+        const booking = await bookingsCollection.findOne({ _id: new ObjectId(bookingId) });
+
+        await bookingsCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          {
+            $set: {
+              paymentStatus: 'Paid',
+              bookingStatus: 'Confirmed',
+              transactionId: session.payment_intent
+            }
+          }
+        );
+
+        await equipmentCollection.updateOne(
+          { _id: new ObjectId(booking.equipmentId) },
+          { $inc: { availableQuantity: -booking.quantity } }
+        );
+
+        const paymentRecord = {
+          bookingId,
+          equipmentId: booking.equipmentId,
+          equipmentName: booking.equipmentName,
+          customerEmail: booking.customerEmail,
+          ownerEmail: booking.ownerEmail,
+          amount: booking.totalAmount,
+          transactionId: session.payment_intent,
+          paymentDate: new Date()
+        };
+        const result = await paymentsCollection.insertOne(paymentRecord);
+        return res.send({ success: true, result });
+      }
+      res.status(400).send({ success: false, message: 'Payment not completed' });
+    });
+
+    app.get('/analytics/admin', verifyToken, verifyAdmin, async (req, res) => {
+      const totalUsers = await usersCollection.countDocuments();
+      const totalEquipment = await equipmentCollection.countDocuments();
+      const totalBookings = await bookingsCollection.countDocuments();
+      const pendingApprovals = await equipmentCollection.countDocuments({ status: 'Pending' });
+      const completedRentals = await bookingsCollection.countDocuments({ bookingStatus: 'Completed' });
+
+      const payments = await paymentsCollection.find().toArray();
+      const totalRevenue = payments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+
+      const monthlyStats = await bookingsCollection.aggregate([
+        {
+          $group: {
+            _id: { $month: "$bookingDate" },
+            bookings: { $sum: 1 },
+            revenue: { $sum: "$totalAmount" }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]).toArray();
+
+      res.send({
+        totalUsers,
+        totalEquipment,
+        totalBookings,
+        pendingApprovals,
+        completedRentals,
+        totalRevenue,
+        monthlyStats
+      });
+    });
+
+    app.get('/analytics/owner/:email', verifyToken, verifyOwner, async (req, res) => {
+      const email = req.params.email;
+      const totalListedEquipment = await equipmentCollection.countDocuments({ ownerEmail: email });
+      const completedRentals = await bookingsCollection.countDocuments({ ownerEmail: email, bookingStatus: 'Completed' });
+
+      const payments = await paymentsCollection.find({ ownerEmail: email }).toArray();
+      const totalEarnings = payments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+
+      const monthlyEarnings = await paymentsCollection.aggregate([
+        { $match: { ownerEmail: email } },
+        {
+          $group: {
+            _id: { $month: "$paymentDate" },
+            earnings: { $sum: "$amount" },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]).toArray();
+
+      res.send({
+        totalListedEquipment,
+        completedRentals,
+        totalEarnings,
+        monthlyEarnings
+      });
+    });
+
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+
+  } finally {
+  }
+}
+run().catch(console.dir);
+
+app.get('/', (req, res) => {
+  res.send('Equipment Rental Platform Server is Running!');
+});
+
+app.listen(port, () => {
+  console.log(`Server is running on port: ${port}`);
+});
