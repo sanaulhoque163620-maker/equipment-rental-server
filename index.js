@@ -293,3 +293,65 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Server is running on port: ${port}`);
 });
+app.post('/favorites', verifyToken, verifyRenter, async (req, res) => {
+      const favorite = req.body;
+      const existing = await favoritesCollection.findOne({
+        userEmail: favorite.userEmail,
+        equipmentId: favorite.equipmentId
+      });
+      if (existing) {
+        return res.send({ message: 'Already in favorites', insertedId: null });
+      }
+      const result = await favoritesCollection.insertOne({
+        ...favorite,
+        createdAt: new Date()
+      });
+      res.send(result);
+    });
+
+    app.get('/favorites/:email', verifyToken, verifyRenter, async (req, res) => {
+      const email = req.params.email;
+      const result = await favoritesCollection.find({ userEmail: email }).sort({ createdAt: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.delete('/favorites/:id', verifyToken, verifyRenter, async (req, res) => {
+      const id = req.params.id;
+      const result = await favoritesCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    app.post('/bookings', verifyToken, verifyRenter, async (req, res) => {
+      const booking = req.body;
+      const equipment = await equipmentCollection.findOne({ _id: new ObjectId(booking.equipmentId) });
+      if (!equipment || equipment.availableQuantity < parseInt(booking.quantity)) {
+        return res.status(400).send({ message: 'Requested quantity is not available' });
+      }
+      const newBooking = {
+        ...booking,
+        quantity: parseInt(booking.quantity),
+        totalAmount: parseFloat(booking.totalAmount),
+        paymentStatus: 'Unpaid',
+        bookingStatus: 'Pending',
+        bookingDate: new Date()
+      };
+      const result = await bookingsCollection.insertOne(newBooking);
+      res.send(result);
+    });
+
+    app.get('/bookings/customer/:email', verifyToken, verifyRenter, async (req, res) => {
+      const email = req.params.email;
+      const result = await bookingsCollection.find({ customerEmail: email }).sort({ bookingDate: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.get('/bookings/owner/:email', verifyToken, verifyOwner, async (req, res) => {
+      const email = req.params.email;
+      const result = await bookingsCollection.find({ ownerEmail: email }).sort({ bookingDate: -1 }).toArray();
+      res.send(result);
+    });
+
+    app.get('/admin/bookings', verifyToken, verifyAdmin, async (req, res) => {
+      const result = await bookingsCollection.find().sort({ bookingDate: -1 }).toArray();
+      res.send(result);
+    });
