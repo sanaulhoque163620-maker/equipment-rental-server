@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-require('dotenv').config();
+require('dns').setServers(['8.8.8.8', '8.8.4.4']);
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const cron = require('node-cron');
@@ -11,10 +11,22 @@ const nodemailer = require('nodemailer');
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors({
-  origin: ['http://localhost:3000'],
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (
+        !origin ||
+        origin.includes("localhost") ||
+        origin.endsWith(".vercel.app")
+      ) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
@@ -27,14 +39,22 @@ const client = new MongoClient(uri, {
   }
 });
 
-async function run() {
-  try {
     const db = client.db("equipmentRentalDB");
-    const usersCollection = db.collection("users");
-    const equipmentCollection = db.collection("equipment");
-    const bookingsCollection = db.collection("bookings");
-    const paymentsCollection = db.collection("payments");
-    const favoritesCollection = db.collection("favorites");
+const usersCollection = db.collection("users");
+const equipmentCollection = db.collection("equipment");
+const bookingsCollection = db.collection("bookings");
+const paymentsCollection = db.collection("payments");
+const favoritesCollection = db.collection("favorites");
+
+app.use(async (req, res, next) => {
+  try {
+    await client.connect();
+    next();
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+    res.status(500).send({ message: "Database connection failed" });
+  }
+});
 
     app.post('/jwt', async (req, res) => {
       const user = req.body;
@@ -47,7 +67,7 @@ async function run() {
       if (!authHeader) {
         return res.status(401).send({ message: 'unauthorized access' });
       }
-      const token = authHeader.split(' ');
+      const token = authHeader.split(' ')[1];
       jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
         if (err) {
           return res.status(401).send({ message: 'unauthorized access' });
@@ -282,7 +302,7 @@ async function run() {
       res.send(result);
     });
 
-    app.post('/favorites', verifyToken, verifyRenter, async (req, res) => {
+    app.post('/favorites', verifyToken, async (req, res) => {
       const favorite = req.body;
       const existing = await favoritesCollection.findOne({
         userEmail: favorite.userEmail,
@@ -298,28 +318,32 @@ async function run() {
       res.send(result);
     });
 
-    app.get('/favorites/:email', verifyToken, verifyRenter, async (req, res) => {
+    app.get('/favorites/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       const result = await favoritesCollection.find({ userEmail: email }).sort({ createdAt: -1 }).toArray();
       res.send(result);
     });
 
-    app.delete('/favorites/:id', verifyToken, verifyRenter, async (req, res) => {
+    app.delete('/favorites/:id', verifyToken, async (req, res) => {
       const id = req.params.id;
-      const result = await favoritesCollection.deleteOne({ _id: new ObjectId(id) });
+      const query = ObjectId.isValid(id)
+        ? { $or: [{ _id: new ObjectId(id) }, { equipmentId: id }] }
+        : { equipmentId: id };
+      const result = await favoritesCollection.deleteOne(query);
       res.send(result);
     });
 
-    app.post('/bookings', verifyToken, verifyRenter, async (req, res) => {
+    app.post('/bookings', verifyToken, async (req, res) => {
       const booking = req.body;
+      const qty = parseInt(booking.quantity) || 1;
       const equipment = await equipmentCollection.findOne({ _id: new ObjectId(booking.equipmentId) });
-      if (!equipment || equipment.availableQuantity < parseInt(booking.quantity)) {
+      if (!equipment || (equipment.availableQuantity !== undefined && equipment.availableQuantity < qty)) {
         return res.status(400).send({ message: 'Requested quantity is not available' });
       }
       const newBooking = {
         ...booking,
-        quantity: parseInt(booking.quantity),
-        totalAmount: parseFloat(booking.totalAmount),
+        quantity: qty,
+        totalAmount: parseFloat(booking.totalAmount || booking.totalPrice || 0),
         paymentStatus: 'Unpaid',
         bookingStatus: 'Pending',
         bookingDate: new Date()
@@ -345,27 +369,49 @@ async function run() {
       res.send(result);
     });
 
-    app.post('/create-checkout-session', verifyToken, verifyRenter, async (req, res) => {
-      const booking = req.body;
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency: 'usd',
-              product_data: {
-                name: booking.equipmentName,
+    app.patch('/bookings/status/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const { bookingStatus } = req.body;
+      const result = await bookingsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { bookingStatus } }
+      );
+      res.send(result);
+    });
+
+    app.get('/bookings/single/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'Invalid ID' });
+      const result = await bookingsCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+   app.post('/create-checkout-session', verifyToken, async (req, res) => {
+      try {
+        const booking = req.body;
+        const amount = Math.round(parseFloat(booking.totalAmount || booking.totalPrice || 50) * 100);
+        const session = await stripe.checkout.sessions.create({
+         
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: booking.equipmentName || booking.name || 'Equipment Rental',
+                },
+                unit_amount: amount > 50 ? amount : 5000,
               },
-              unit_amount: Math.round(parseFloat(booking.totalAmount) * 100),
+              quantity: 1,
             },
-            quantity: 1,
-          },
-        ],
-        mode: 'payment',
-        success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&bookingId=${booking.bookingId}`,
-        cancel_url: `${process.env.CLIENT_URL}/equipment/${booking.equipmentId}`,
-      });
-      res.send({ url: session.url });
+          ],
+          mode: 'payment',
+          success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&bookingId=${booking.bookingId || ''}`,
+          cancel_url: `${process.env.CLIENT_URL}/equipment/${booking.equipmentId || ''}`,
+        });
+        res.send({ url: session.url });
+      } catch (err) {
+        res.status(400).send({ message: err.message });
+      }
     });
 
     app.post('/payments/confirm', verifyToken, verifyRenter, async (req, res) => {
@@ -510,16 +556,6 @@ async function run() {
       }
     });
 
-    
-
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
-
-  } finally {
-  }
-}
-run().catch(console.dir);
-
 app.get('/', (req, res) => {
   res.send('Equipment Rental Platform Server is Running!');
 });
@@ -527,3 +563,5 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Server is running on port: ${port}`);
 });
+
+module.exports = app;
